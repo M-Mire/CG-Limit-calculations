@@ -31,11 +31,9 @@ class EnvelopeIntersectionAnalyzer:
         self.env1_segments = []
         self.env2_segments = []
         self.connections = {}
-        self.interpolated_points = []  # Track interpolated points
         
         # Automatically analyze intersections and create connection graph
         self._analyze_intersections()
-        self._add_weight_interpolations()  # New method for weight interpolations
         self._create_connection_graph()
     
     @staticmethod
@@ -62,7 +60,7 @@ class EnvelopeIntersectionAnalyzer:
             # Calculate intersection point
             i_mac = mac1 + t * (mac2 - mac1)
             i_weight = weight1 + t * (weight2 - weight1)
-            return CGPoint(i_mac, i_weight, 0)
+            return CGPoint(i_mac, i_weight,0)
 
         return None
 
@@ -78,98 +76,21 @@ class EnvelopeIntersectionAnalyzer:
 
         return intersections
 
-    def interpolate_mac_at_weight(self, target_weight: float, point1: CGPoint, point2: CGPoint, epsilon=1e-6) -> Optional[float]:
-        """Interpolate MAC value at a specific weight between two points."""
-        x1, y1 = point1.mac, point1.weight
-        x2, y2 = point2.mac, point2.weight
-        
-        # Check if target weight is within the segment range
-        if not (min(y1, y2) <= target_weight <= max(y1, y2)):
-            return None
-            
-        # Handle vertical line case (same weight)
-        if abs(y2 - y1) < epsilon:
-            return x1 if abs(target_weight - y1) < epsilon else None
-        
-        # Linear interpolation: x = x1 + (x2-x1) * (target_weight-y1)/(y2-y1)
-        interpolated_mac = x1 + (x2 - x1) * (target_weight - y1) / (y2 - y1)
-        return interpolated_mac
 
-    def find_interpolation_points(self, env1: List[CGPoint], env2: List[CGPoint]) -> List[Tuple[int, int, CGPoint, str]]:
-        """Find points where we need to interpolate to connect envelopes at specific weights."""
-        interpolation_points = []
+    def interpolate_mac(self, target_weight: float, point1: CGPoint, point2: CGPoint, epsilon=1e-6) -> Optional[float]:
+        """Interpolate MAC value at a specific weight between two points."""
+        w1, w2 = point1.weight, point2.weight
+        mac1, mac2 = point1.mac, point2.mac
         
-        # Get all unique weights from both envelopes
-        env1_weights = set(point.weight for point in env1)
-        env2_weights = set(point.weight for point in env2)
+        # Handle vertical line (same weight)
+        if abs(w2 - w1) < epsilon:
+            return mac1 if abs(target_weight - w1) < epsilon else mac2
         
-        # Get weight ranges for each envelope
-        env1_min_weight = min(point.weight for point in env1)
-        env1_max_weight = max(point.weight for point in env1)
-        env2_min_weight = min(point.weight for point in env2)
-        env2_max_weight = max(point.weight for point in env2)
+        # Linear interpolation: mac = mac1 + (mac2 - mac1) * (target_weight - w1) / (w2 - w1)
+        interpolated_mac = mac1 + (mac2 - mac1) * (target_weight - w1) / (w2 - w1)
+        return interpolated_mac
         
-        # Find weights that exist in one envelope but not the other, within valid ranges
-        weights_only_in_env1 = env1_weights - env2_weights
-        weights_only_in_env2 = env2_weights - env1_weights
         
-        # For each weight only in env2, try to interpolate in env1 (if within env1's range)
-        for target_weight in weights_only_in_env2:
-            if env1_min_weight <= target_weight <= env1_max_weight:
-                for i in range(len(env1) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(target_weight, env1[i], env1[i+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, target_weight, 1)  # Keep env1's envelope number
-                        interpolation_points.append((i, -1, interpolated_point, "env1_interpolated"))
-        
-        # For each weight only in env1, try to interpolate in env2 (if within env2's range)
-        for target_weight in weights_only_in_env1:
-            if env2_min_weight <= target_weight <= env2_max_weight:
-                for j in range(len(env2) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(target_weight, env2[j], env2[j+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, target_weight, 2)  # Keep env2's envelope number
-                        interpolation_points.append((-1, j, interpolated_point, "env2_interpolated"))
-        
-        # Add interpolation points at envelope boundaries to enable cross-envelope connections
-        # If env1 starts later, interpolate env2 at env1's starting weight
-        if env1_min_weight > env2_min_weight and env1_min_weight <= env2_max_weight:
-            if env1_min_weight not in env2_weights:
-                for j in range(len(env2) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(env1_min_weight, env2[j], env2[j+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, env1_min_weight, 2)
-                        interpolation_points.append((-1, j, interpolated_point, "env2_boundary"))
-        
-        # If env2 starts later, interpolate env1 at env2's starting weight
-        if env2_min_weight > env1_min_weight and env2_min_weight <= env1_max_weight:
-            if env2_min_weight not in env1_weights:
-                for i in range(len(env1) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(env2_min_weight, env1[i], env1[i+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, env2_min_weight, 1)
-                        interpolation_points.append((i, -1, interpolated_point, "env1_boundary"))
-        
-        # Add interpolation points at ending boundaries
-        # If env1 ends earlier, interpolate env2 at env1's ending weight
-        if env1_max_weight < env2_max_weight and env1_max_weight >= env2_min_weight:
-            if env1_max_weight not in env2_weights:
-                for j in range(len(env2) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(env1_max_weight, env2[j], env2[j+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, env1_max_weight, 2)
-                        interpolation_points.append((-1, j, interpolated_point, "env2_end_boundary"))
-        
-        # If env2 ends earlier, interpolate env1 at env2's ending weight
-        if env2_max_weight < env1_max_weight and env2_max_weight >= env1_min_weight:
-            if env2_max_weight not in env1_weights:
-                for i in range(len(env1) - 1):
-                    interpolated_mac = self.interpolate_mac_at_weight(env2_max_weight, env1[i], env1[i+1])
-                    if interpolated_mac is not None:
-                        interpolated_point = CGPoint(interpolated_mac, env2_max_weight, 1)
-                        interpolation_points.append((i, -1, interpolated_point, "env1_end_boundary"))
-        
-        return interpolation_points
 
     @staticmethod
     def distance_along_segment(start: CGPoint, end: CGPoint, point: CGPoint) -> float:
@@ -227,82 +148,58 @@ class EnvelopeIntersectionAnalyzer:
         self.env1_segments = self.split_envelope_at_intersections(self.env1_original, env1_intersections)
         self.env2_segments = self.split_envelope_at_intersections(self.env2_original, env2_intersections)
     
-    def _add_weight_interpolations(self):
-        """Add interpolated points at weights where envelopes don't naturally intersect."""
-        # Find interpolation points
-        interpolation_points = self.find_interpolation_points(self.env1_original, self.env2_original)
-        
-        # Get existing intersection points for re-splitting
-        existing_env1_intersections = [(seg1, point) for seg1, seg2, point in self.intersections]
-        existing_env2_intersections = [(seg2, point) for seg1, seg2, point in self.intersections]
-        
-        # Process interpolation points for env1
-        env1_interpolations = [(seg1, point) for seg1, seg2, point, interp_type in interpolation_points 
-                              if "env1" in interp_type and seg1 >= 0]
-        
-        # Process interpolation points for env2
-        env2_interpolations = [(seg2, point) for seg1, seg2, point, interp_type in interpolation_points 
-                              if "env2" in interp_type and seg2 >= 0]
-        
-        # Re-split envelopes including both intersection and interpolation points
-        if env1_interpolations or existing_env1_intersections:
-            all_env1_points = existing_env1_intersections + env1_interpolations
-            self.env1_segments = self.split_envelope_at_intersections(self.env1_original, all_env1_points)
-        
-        if env2_interpolations or existing_env2_intersections:
-            all_env2_points = existing_env2_intersections + env2_interpolations
-            self.env2_segments = self.split_envelope_at_intersections(self.env2_original, all_env2_points)
-        
-        # Store interpolated points for visualization
-        self.interpolated_points = [point for seg1, seg2, point, interp_type in interpolation_points]
-        
-        print(f"Added {len(self.interpolated_points)} interpolated points for weight connections")
-        
-        # Print interpolation details
-        env1_min = min(p.weight for p in self.env1_original)
-        env1_max = max(p.weight for p in self.env1_original)
-        env2_min = min(p.weight for p in self.env2_original)
-        env2_max = max(p.weight for p in self.env2_original)
-        print(f"Env1 weight range: {env1_min} - {env1_max}")
-        print(f"Env2 weight range: {env2_min} - {env2_max}")
-        print(f"Overall weight range: {min(env1_min, env2_min)} - {max(env1_max, env2_max)}")
-    
     def _create_connection_graph(self):
         """Create a dictionary mapping each point to the points it connects to."""
         self.connections = {}
 
-        # Add connections from envelope segments
         for segments in self.env1_segments:
-            start, end, _ = segments
+            start,end,_ = segments
+            # Use CGPoint objects directly as keys
             if start not in self.connections:
                 self.connections[start] = set()
             self.connections[start].add(end)
+             # Ensure end point exists in dictionary
             if end not in self.connections:
                 self.connections[end] = set()
+        
+        
+        start_A, end_A, _ = self.env1_segments[0]
 
         for segments in self.env2_segments:
             start, end, _ = segments
+
+            # Initialise connections for start and end points
             if start not in self.connections:
                 self.connections[start] = set()
-            self.connections[start].add(end)
             if end not in self.connections:
                 self.connections[end] = set()
 
-        # Add cross-envelope connections at same weights
-        all_points = list(self.connections.keys())
-        for i, point1 in enumerate(all_points):
-            for j, point2 in enumerate(all_points):
-                if i != j and abs(point1.weight - point2.weight) < 0.01:  # Same weight
-                    if point1.env != point2.env or point1.env == 0 or point2.env == 0:  # Different envelopes or intersection points
-                        self.connections[point1].add(point2)
-                        self.connections[point2].add(point1)
+            # Add the basic connection
+            self.connections[start].add(end)
+
+            # Handle interpolation if needed
+            if start.weight < start_A.weight and end.weight > start_A.weight or end.weight == start_A.weight:
+                interpolated_mac = self.interpolate_mac(start_A.weight, start, end)
+                interpolated_point = CGPoint(interpolated_mac, start_A.weight, 0)
+
+                # Initialise connections for interpolated point
+                if interpolated_point not in self.connections:
+                    self.connections[interpolated_point] = set()
+
+                # Set up new connections with interpolation
+                self.connections[interpolated_point].add(start_A)
+                self.connections[start].add(interpolated_point)
+                self.connections[interpolated_point].add(end)
+
+                # Remove the direct connection from start to end
+                self.connections[start].discard(end)
+            
 
         # Convert sets to sorted lists
         for key in self.connections:
             self.connections[key] = sorted(list(self.connections[key]), 
                                          key=lambda p: (p.weight, -p.mac))
-        
-        print(f"Created connection graph with {len(self.connections)} nodes")
+        print(self.env1_segments)
     
     def get_points_at_weight(self, target_weight: float) -> List[CGPoint]:
         """Get all points at a specific weight, sorted by MAC descending."""
@@ -332,45 +229,53 @@ class EnvelopeIntersectionAnalyzer:
         
         return closest_point
     
-    def find_optimal_path(self, start_point: CGPoint, end_point: CGPoint) -> List[CGPoint]:
+    def find_optimal_path(self) -> List[CGPoint]:
         """
         Find the optimal path (highest MAC values) from start_point to end_point.
         """
         path = []
-        
-        # Find the actual starting point - lowest weight across all envelopes
-        all_points = list(self.connections.keys())
-        min_weight = min(point.weight for point in all_points)
-        max_weight = max(point.weight for point in all_points)
-        
-        # Get all points at minimum weight and choose the one with highest MAC
-        starting_candidates = [point for point in all_points if abs(point.weight - min_weight) < 0.01]
-        current_point = max(starting_candidates, key=lambda p: p.mac)
-        
-        print(f"Starting from point: {current_point} (min weight: {min_weight})")
+        print("LISTEN")
+        current_point = None
+        A,_,_ = self.env1_segments[0]
+        B,_,_ = self.env2_segments[0]
+        if A.weight == B.weight:
+            if A.mac > B.mac:
+                current_point = A
+                print("Current point is A")
+            else:
+                current_point = B
+                print("Current point is B")
+                
+        elif A.weight > B.weight:
+            current_point = B
+            print("Current point is B")    
+        else:
+            current_point = A
+            print("Current point is A")
         
         # Find the closest actual point to our start point
         current_env = current_point.env
         path.append(current_point)
         
-        while current_point.weight < max_weight:
+        while current_point.weight < end_point.weight:
             # Get outgoing connections from current point
             outgoing = self.connections.get(current_point, [])
             print()
-            print("CURRENT WEIGHT", current_point.weight)
+            print("CURRENT WEIGHT",current_point.weight)
             print("outgoing", outgoing)
-            print("current_point", current_point)
-            
+            print("current_point",current_point)
             if not outgoing:
                 break
             
             # Find connections that lead to higher weight
             next_candidates = [p for p in outgoing if p.weight > current_point.weight]
+            print(next_candidates)
             
             if not next_candidates:
                 # Edge case where if we start with same macs or if we interpolated to this point
+                # We check if the outgoing has another outgoing with a higher weight RARELY we should enter here
                 for point in outgoing:
-                    for pt in self.connections.get(point, []):
+                    for pt in self.connections.get(point,[]):
                         if pt.weight > current_point.weight:
                             next_candidates.append(point)
                 
@@ -391,29 +296,30 @@ class EnvelopeIntersectionAnalyzer:
 
             # Look for higher MAC option at this weight
             for point in points_at_weight:
-                # Only consider points of intersection or in the same envelope
-                if current_env == 0 or point.env == current_env or point.env == 0:
+                #Only consider points of intersection or in the same envelope
+                if current_env== 0 or point.env == current_env or point.env == 0:
                     # Check if this higher MAC point can progress further
                     higher_outgoing = self.connections.get(point, [])
                     can_progress = any(p.weight > current_point.weight for p in higher_outgoing)
-                    if current_point.weight >= max_weight or can_progress:
+                    if current_point.weight >= end_point.weight or can_progress:
                         path.append(point)
                         current_point = point
                         break
                         
-            # Check to see if the current weight is max. If not add mac and add outgoing again for the same env
+            #Check to see if the current weight is max. If not add mac and add outgoing again for the same env
+            
             filtered_points = [point for point in points_at_weight
                                if current_env == 0 or point.env == current_env or point.env == 0]
             max_at_weight = max(filtered_points, key=lambda point: point.mac, default=current_point)
             if max_at_weight == current_point:
                 continue
             else:
-                # Add max point at that weight
+                #Add max point at that weight
                 path.append(max_at_weight)
                 # add the current_point back
                 path.append(current_point)
             
-            if current_point.weight >= max_weight:
+            if current_point.weight >= end_point.weight:
                 break
         
         return path
@@ -439,14 +345,7 @@ class EnvelopeIntersectionAnalyzer:
             intersection_mac = [point.mac for point in intersection_points]
             intersection_weight = [point.weight for point in intersection_points]
             plt.plot(intersection_mac, intersection_weight, 'rx', markersize=12, 
-                    markeredgewidth=3, label='Intersections', alpha=0.7)
-        
-        # Plot interpolated points
-        if self.interpolated_points:
-            interp_mac = [point.mac for point in self.interpolated_points]
-            interp_weight = [point.weight for point in self.interpolated_points]
-            plt.plot(interp_mac, interp_weight, 'mo', markersize=10, 
-                    alpha=0.7, label='Interpolated Points')
+                    markeredgewidth=3, label='Intersections',alpha=0.7)
         
         # Plot optimal path if provided
         if optimal_path:
@@ -472,7 +371,6 @@ class EnvelopeIntersectionAnalyzer:
         print(f"Envelope 1: {len(self.env1_original)} points")
         print(f"Envelope 2: {len(self.env2_original)} points")
         print(f"Intersections found: {len(self.intersections)}")
-        print(f"Interpolated points added: {len(self.interpolated_points)}")
         print(f"Envelope 1 split into: {len(self.env1_segments)} segments")
         print(f"Envelope 2 split into: {len(self.env2_segments)} segments")
         print(f"Total unique points in graph: {len(self.connections)}")
@@ -481,11 +379,6 @@ class EnvelopeIntersectionAnalyzer:
             print(f"\nIntersection Points:")
             for i, (seg1, seg2, point) in enumerate(self.intersections):
                 print(f"  {i+1}: {point} (Env1 seg {seg1} ↔ Env2 seg {seg2})")
-        
-        if self.interpolated_points:
-            print(f"\nInterpolated Points:")
-            for i, point in enumerate(self.interpolated_points):
-                print(f"  {i+1}: {point}")
         
         if optimal_path:
             print(f"\nOptimal Path ({len(optimal_path)} points):")
@@ -499,29 +392,27 @@ class EnvelopeIntersectionAnalyzer:
             print(f"  Weight range: {optimal_path[0].weight:.0f} → {optimal_path[-1].weight:.0f}")
 
 
-# Test with different weight ranges - env1 no longer has 150000
+# Define the envelopes
 env1 = [
-    CGPoint(weight=150000, mac=21.00, env=1),
-    CGPoint(weight=200000, mac=21.00, env=1),
-    CGPoint(weight=200000, mac=16.00, env=1),
-    CGPoint(weight=250000, mac=17.00, env=1),
-    CGPoint(weight=250000, mac=21.00, env=1),
-    CGPoint(weight=300000, mac=22.00, env=1),
-    CGPoint(weight=300000, mac=17.00, env=1),
+    CGPoint(weight=150000, mac=21.00,env=1),
+    CGPoint(weight=200000, mac=21.00,env=1),
+    CGPoint(weight=200000, mac=16.00,env=1),
+    CGPoint(weight=250000, mac=17.00,env=1),
+    CGPoint(weight=250000, mac=21.00,env=1),
+    CGPoint(weight=300000, mac=22.00,env=1),
+    CGPoint(weight=300000, mac=17.00,env=1),
 ]
 
 env2 = [
-    CGPoint(weight=100000, mac=15.00, env=2),
-    CGPoint(weight=200000, mac=18.00, env=2),
-    CGPoint(weight=250000, mac=14.00, env=2),
-    CGPoint(weight=250000, mac=26.00, env=2),
-    CGPoint(weight=250000, mac=19.00, env=2),
-    CGPoint(weight=300000, mac=22.00, env=2)
+    CGPoint(weight=100000, mac=15.00,env=2),
+    CGPoint(weight=200000, mac=18.00,env=2),
+    CGPoint(weight=250000, mac=14.00,env=2),
+    CGPoint(weight=250000, mac=26.00,env=2),
+    CGPoint(weight=250000, mac=19.00,env=2),
+    CGPoint(weight=300000, mac=22.00,env=2)
 ]
 
-# Find optimal path
-start_point = env1[0]
-end_point = env1[-1]
+
 
 # Create analyzer instance
 analyzer = EnvelopeIntersectionAnalyzer(env1, env2)
@@ -550,178 +441,17 @@ for point, connected_points in sorted(analyzer.connections.items(), key=lambda x
         print(f"    {connected}")
     print()
 
-optimal_path = analyzer.find_optimal_path(start_point, end_point)
+
+optimal_path = analyzer.find_optimal_path()
 
 # Print summary
 analyzer.print_summary(optimal_path)
 
 # Plot the analysis
-analyzer.plot_analysis(optimal_path, "Aircraft CG Envelope Analysis with Weight Interpolation")
+analyzer.plot_analysis(optimal_path, "Aircraft CG Envelope Analysis")
 
 print(f"\nScript completed successfully!")
 print(f"Total intersections found: {len(analyzer.intersections)}")
-print(f"Total interpolated points: {len(analyzer.interpolated_points)}")
 print(f"Envelope 1 split into {len(analyzer.env1_segments)} segments")
 print(f"Envelope 2 split into {len(analyzer.env2_segments)} segments")
 print(f"Total unique points in network: {len(analyzer.connections)}")
-
-# env1 = [
-#     CGPoint(weight=150000, mac=15,env=1),
-#     CGPoint(weight=200000, mac=15,env=1), 
-#     CGPoint(weight=200000, mac=26,env=1),
-#     CGPoint(weight=300000, mac=25,env=1)
-# ]
-
-# env2 = [
-#     CGPoint(weight=150000, mac=21,env=2),
-#     CGPoint(weight=300000, mac=25,env=2)
-# ]
-
-# Find optimal path
-# start_point = env2[0]
-# end_point = env1[-1]
-
-# env1 = [
-#     CGPoint(weight=150000, mac=21.00,env=1),
-#     CGPoint(weight=225000, mac=26.00,env=1),
-#     CGPoint(weight=300000, mac=16.00,env=1)
-# ]
-
-# env2 = [
-#     CGPoint(weight=150000, mac=15.00,env=2),
-#     CGPoint(weight=200000, mac=18.00,env=2),
-#     CGPoint(weight=250000, mac=14.00,env=2),
-#     CGPoint(weight=250000, mac=26.00,env=2),
-#     CGPoint(weight=250000, mac=19.00,env=2),
-#     CGPoint(weight=300000, mac=22.00,env=2)
-# ]
-# # Find optimal path
-# start_point = env1[0]
-# end_point = env1[-1]
-
-# env1 = [
-#     CGPoint(weight=1200,mac=15,env=1),
-#     CGPoint(weight=1500,mac=17,env=1),
-#     CGPoint(weight=1500,mac=16,env=1),
-#     CGPoint(weight=1500,mac=18,env=1),
-#     CGPoint(weight=2200,mac=22,env=1),
-#     CGPoint(weight=2800,mac=30,env=1),
-# ]
-
-# env2 = [
-#      CGPoint(weight=1200,mac=16,env=2),
-#      CGPoint(weight=1500,mac=15,env=2),
-#      CGPoint(weight=2500,mac=25,env=2),
-#      CGPoint(weight=2800,mac=31,env=2),
-# ]
-# # Find optimal path
-# start_point = env2[0]
-# end_point = env1[-1]
-
-# env1 = [
-#     CGPoint(weight=150000, mac=21.00,env=1),
-#     CGPoint(weight=200000, mac=21.00,env=1),
-#     CGPoint(weight=200000, mac=16.00,env=1),
-#     CGPoint(weight=250000, mac=17.00,env=1),
-#     CGPoint(weight=250000, mac=21.00,env=1),
-#     CGPoint(weight=300000, mac=22.00,env=1),
-#     CGPoint(weight=300000, mac=17.00,env=1),
-# ]
-
-# env2 = [
-#     CGPoint(weight=150000, mac=15.00,env=2),
-#     CGPoint(weight=200000, mac=18.00,env=2),
-#     CGPoint(weight=250000, mac=14.00,env=2),
-#     CGPoint(weight=250000, mac=26.00,env=2),
-#     CGPoint(weight=250000, mac=19.00,env=2),
-#     CGPoint(weight=300000, mac=22.00,env=2)
-# ]
-
-# # Find optimal path
-# start_point = env1[0]
-# end_point = env1[-1]
-
-
-# env1 = [
-#     CGPoint(weight=200000, mac=21.00,env=1),
-#     CGPoint(weight=200000, mac=16.00,env=1),
-#     CGPoint(weight=250000, mac=17.00,env=1),
-#     CGPoint(weight=250000, mac=21.00,env=1),
-#     CGPoint(weight=300000, mac=22.00,env=1),
-#     CGPoint(weight=300000, mac=17.00,env=1),
-# ]
-
-# env2 = [
-#     CGPoint(weight=200000, mac=15.00,env=2),
-#     CGPoint(weight=300000, mac=20.00,env=2),
-# ]
-
-# # Find optimal path
-# start_point = env1[0]
-# end_point = env1[-1]
-
-# env1 = [
-# CGPoint(weight=160000, mac=16,env=1),
-# CGPoint(weight=188500, mac=16,env=1),
-# CGPoint(weight=197800, mac=15,env=1),
-# CGPoint(weight=233000, mac=15,env=1),
-# CGPoint(weight=245000, mac=15,env=1),
-# CGPoint(weight=270000, mac=15,env=1),
-# CGPoint(weight=280000, mac=19,env=1),
-# CGPoint(weight=300000, mac=18,env=1),
-# CGPoint(weight=300000, mac=17,env=1),
-# CGPoint(weight=350000, mac=17,env=1),
-# CGPoint(weight=354600, mac=18,env=1),
-# CGPoint(weight=368000, mac=15,env=1),
-# ]
-
-# env2 = [
-# CGPoint(weight=160000, mac=16,env=2),
-# CGPoint(weight=188500, mac=16,env=2),
-# CGPoint(weight=197800, mac=15,env=2),
-# CGPoint(weight=233000, mac=15,env=2),
-# CGPoint(weight=245000, mac=15,env=2),
-# CGPoint(weight=270000, mac=15,env=2),
-# CGPoint(weight=280000, mac=19,env=2),
-# CGPoint(weight=300000, mac=21,env=2),
-# CGPoint(weight=300000, mac=24,env=2),
-# CGPoint(weight=350000, mac=17,env=2),
-# CGPoint(weight=354600, mac=18,env=2),
-# CGPoint(weight=368000, mac=23,env=2),
-# ]
-
-# # Find optimal path
-# start_point = env1[0]
-# end_point = env1[-1]
-
-# env1 = [
-# CGPoint(weight=160000, mac=16,env=1),
-# CGPoint(weight=188500, mac=16,env=1),
-# CGPoint(weight=197800, mac=15,env=1),
-# CGPoint(weight=233000, mac=15,env=1),
-# CGPoint(weight=245000, mac=15,env=1),
-# CGPoint(weight=270000, mac=15,env=1),
-# CGPoint(weight=280000, mac=19,env=1),
-# CGPoint(weight=320000, mac=18,env=1),
-# CGPoint(weight=320001, mac=15,env=1),
-# CGPoint(weight=350000, mac=17,env=1),
-# CGPoint(weight=354600, mac=18,env=1),
-# CGPoint(weight=368000, mac=15,env=1),
-# ]
-
-# env2 = [
-# CGPoint(weight=160000, mac=16,env=2),
-# CGPoint(weight=188500, mac=16,env=2),
-# CGPoint(weight=197800, mac=15,env=2),
-# CGPoint(weight=233000, mac=15,env=2),
-# CGPoint(weight=300000, mac=19,env=2),
-# CGPoint(weight=300000, mac=21,env=2),
-# CGPoint(weight=300000, mac=16,env=2),
-# CGPoint(weight=350000, mac=17,env=2),
-# CGPoint(weight=354600, mac=18,env=2),
-# CGPoint(weight=368000, mac=15,env=2),
-# ]
-
-# # Find optimal path
-# start_point = env1[0]
-# end_point = env1[-1]
