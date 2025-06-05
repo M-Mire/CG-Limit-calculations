@@ -1,200 +1,593 @@
-from typing import List, Optional, Set
-from itertools import groupby
+import matplotlib.pyplot as plt
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
+@dataclass
 class CGPoint:
-    def __init__(self, weight: float, mac: float, vectorPointId: Optional[int], vectorId: Optional[int]):
-        self.weight = weight
-        self.mac = mac
-        self.vectorPointId = vectorPointId
-        self.vectorId = vectorId
+    mac: float  # mac (mean aerodynamic chord)
+    weight: float  # weight
+    env: int
     
     def __repr__(self):
-        return (f"CGPoint(weight={self.weight}, mac={self.mac}, "
-                f"vectorPointId={self.vectorPointId}, vectorId={self.vectorId})")
+        return f"CGPoint(weight={self.weight:.0f}, mac={self.mac:.2f}, env={self.env:.2f})"
+    
+    def __hash__(self):
+        return hash((round(self.mac, 2), round(self.weight, 0), round(self.env, 0)))
+    
+    def __eq__(self, other):
+        if not isinstance(other, CGPoint):
+            return False
+        return (round(self.mac, 2) == round(other.mac, 2) and 
+                round(self.weight, 0) == round(other.weight, 0))
 
-def clean_duplicate_weights(points: List[CGPoint]) -> List[CGPoint]:
-    """
-    Clean up duplicate weights following the specified ordering logic.
-    Assumes points are already sorted by weight.
-    """
-    # Pre-scan to identify duplicate weights in O(n) time
-    duplicate_weights: Set[float] = set()
-    prev_weight = None
+class EnvelopeIntersectionAnalyzer:
+    """Main class for analyzing envelope intersections and finding optimal paths."""
     
-    for point in points:
-        if prev_weight is not None and point.weight == prev_weight:
-            duplicate_weights.add(point.weight)
-        prev_weight = point.weight
-    
-    # Process groups using itertools.groupby (leverages pre-sorted data)
-    result = []
-    for weight, group_iter in groupby(points, key=lambda p: p.weight):
-        group = list(group_iter)
+    def __init__(self, env1: List[CGPoint], env2: List[CGPoint]):
+        self.env1_original = env1.copy()
+        self.env2_original = env2.copy()
+        self.intersections = []
+        self.env1_segments = []
+        self.env2_segments = []
+        self.connections = {}
         
-        if weight in duplicate_weights:
-            # Complex ordering for duplicates
-            ordered_group = order_duplicate_weight_group(group, points, weight)
-            result.extend(ordered_group)
+        # Automatically analyze intersections and create connection graph
+        self._analyze_intersections()
+        self._create_connection_graph()
+    
+    @staticmethod
+    def line_intersection(p1: CGPoint, p2: CGPoint, p3: CGPoint, p4: CGPoint) -> Optional[CGPoint]:
+        """Find intersection point between two line segments if it exists."""
+        mac1, weight1 = p1.mac, p1.weight
+        mac2, weight2 = p2.mac, p2.weight
+        mac3, weight3 = p3.mac, p3.weight
+        mac4, weight4 = p4.mac, p4.weight
+
+        # Calculate the direction vectors
+        denom = (mac1 - mac2) * (weight3 - weight4) - (weight1 - weight2) * (mac3 - mac4)
+
+        # Lines are parallel if denominator is 0
+        if abs(denom) < 1e-10:
+            return None
+
+        # Calculate parameters
+        t = ((mac1 - mac3) * (weight3 - weight4) - (weight1 - weight3) * (mac3 - mac4)) / denom
+        u = -((mac1 - mac2) * (weight1 - weight3) - (weight1 - weight2) * (mac1 - mac3)) / denom
+
+        # Check if intersection is within both line segments
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            # Calculate intersection point
+            i_mac = mac1 + t * (mac2 - mac1)
+            i_weight = weight1 + t * (weight2 - weight1)
+            return CGPoint(i_mac, i_weight,0)
+
+        return None
+
+    def find_all_intersections(self, env1: List[CGPoint], env2: List[CGPoint]) -> List[Tuple[int, int, CGPoint]]:
+        """Find all intersections between segments of two envelopes."""
+        intersections = []
+
+        for i in range(len(env1) - 1):
+            for j in range(len(env2) - 1):
+                intersection = self.line_intersection(env1[i], env1[i+1], env2[j], env2[j+1])
+                if intersection:
+                    intersections.append((i, j, intersection))
+
+        return intersections
+
+    def interpolate_mac(self, weight: float, point1: CGPoint, point2:CGPoint, epsilon=1e-6):
+        x1,y1 = point1.mac, point1.weight
+        x2,y2 = point2.mac, point2.weight
+        # Perform linear interpolation for x between (x1,y1) and (x2,y2)
+
+        if abs(x1-x2) < epsilon:
+            return x1
+        return ((y2 - y1) * x + x2 * y1 - x1 * y2) / (x2 - x1)
+        
+        
+
+    @staticmethod
+    def distance_along_segment(start: CGPoint, end: CGPoint, point: CGPoint) -> float:
+        """Calculate the distance from start to point along the segment from start to end."""
+        # Use parametric distance (t parameter from line equation)
+        if abs(end.mac - start.mac) > 1e-10:
+            t = (point.mac - start.mac) / (end.mac - start.mac)
         else:
-            # Single point, add directly
-            result.extend(group)
-    
-    return result
+            t = (point.weight - start.weight) / (end.weight - start.weight)
+        return t
 
-def order_duplicate_weight_group(group: List[CGPoint], all_points: List[CGPoint], 
-                               current_weight: float) -> List[CGPoint]:
-    """Order points within a duplicate weight group according to the algorithm."""
-    
-    # Separate envelope and intersection points
-    envelope_points = [p for p in group if p.vectorId is not None]
-    intersection_points = [p for p in group if p.vectorId is None]
-    
-    # Simple case: no complex ordering needed
-    if len(envelope_points) <= 1:
-        return sorted(group, key=lambda p: (p.vectorId is None, -p.mac))
-    
-    # Step 1: Find the first element
-    # Group envelope points by vectorId and find the smallest vectorPointId for each vectorId
-    vector_groups = {}
-    for point in envelope_points:
-        if point.vectorId not in vector_groups:
-            vector_groups[point.vectorId] = []
-        vector_groups[point.vectorId].append(point)
-    
-    # For each vectorId, find the point with smallest vectorPointId
-    vector_candidates = []
-    for vector_id, points_in_vector in vector_groups.items():
-        min_point = min(points_in_vector, key=lambda p: p.vectorPointId if p.vectorPointId else float('inf'))
-        vector_candidates.append((vector_id, min_point.vectorPointId, min_point.mac, min_point))
-    
-    # Among these candidates (one per vectorId), pick the one with highest MAC
-    first_point = max(vector_candidates, key=lambda x: x[2])[3]  # x[2] is MAC, x[3] is the point object
-    
-    remaining_points = [p for p in group if p != first_point]
-    
-    # Step 2: Find the last element (continuation point)
-    continuation_vector_id = _find_continuation_vector_optimized(envelope_points, all_points, current_weight)
-    
-    continuation_point = None
-    if continuation_vector_id:
-        # Find all points with the continuation vectorId from remaining points
-        continuation_candidates = [p for p in remaining_points if p.vectorId == continuation_vector_id]
-        if continuation_candidates:
-            # Choose the one with the highest vectorPointId
-            continuation_point = max(continuation_candidates, key=lambda p: p.vectorPointId if p.vectorPointId else 0)
-    
-    # Step 3: Build ordered result
-    ordered_points = [first_point]
-    
-    # Add middle points (everything except continuation point)
-    # Sort: intersection points first, then other envelope points by MAC descending
-    middle_points = [p for p in remaining_points if p != continuation_point]
-    middle_points.sort(key=lambda p: (p.vectorId is not None, -p.mac))
-    ordered_points.extend(middle_points)
-    
-    # Add continuation point last
-    if continuation_point:
-        ordered_points.append(continuation_point)
-    
-    return ordered_points
+    @staticmethod
+    def split_envelope_at_intersections(envelope: List[CGPoint], intersections: List[Tuple[int, CGPoint]]) -> List[Tuple[CGPoint, CGPoint, str]]:
+        """Split envelope segments at intersection points and return list of segments."""
+        segments = []
 
-def _find_continuation_vector_optimized(envelope_points: List[CGPoint], all_points: List[CGPoint], 
-                                      current_weight: float) -> Optional[int]:
-    """
-    Find which vectorId continues to the next weight.
-    Optimized for pre-sorted data - can scan forward efficiently.
-    """
-    current_vector_ids = {p.vectorId for p in envelope_points}
-    
-    # Scan forward from current position to find next different weight
-    found_current = False
-    for point in all_points:
-        if point.weight == current_weight:
-            found_current = True
-            continue
-        elif found_current and point.weight > current_weight:
-            # This is the next weight group
-            if point.vectorId is not None and point.vectorId in current_vector_ids:
-                return point.vectorId
-            # Keep checking other points at this same next weight
-            next_weight = point.weight
-            for next_point in all_points:
-                if next_point.weight == next_weight and next_point.vectorId is not None:
-                    if next_point.vectorId in current_vector_ids:
-                        return next_point.vectorId
-                elif next_point.weight > next_weight:
-                    break
-            break
-    
-    return None
+        # Group intersections by segment index
+        intersections_by_segment = {}
+        for seg_idx, point in intersections:
+            if seg_idx not in intersections_by_segment:
+                intersections_by_segment[seg_idx] = []
+            intersections_by_segment[seg_idx].append(point)
 
-def analyze_duplicates(points: List[CGPoint]) -> dict:
-    """Utility function to analyze duplicate patterns in the data."""
-    duplicate_info = {}
+        for current_seg in range(len(envelope) - 1):
+            start_point = envelope[current_seg]
+            end_point = envelope[current_seg + 1]
+
+            if current_seg not in intersections_by_segment:
+                # No intersections, add segment as is
+                segments.append((start_point, end_point, "direct"))
+            else:
+                # Sort intersections by their position along the segment
+                seg_intersections = intersections_by_segment[current_seg]
+                seg_intersections.sort(key=lambda p: EnvelopeIntersectionAnalyzer.distance_along_segment(start_point, end_point, p))
+
+                # Add segments split by intersections
+                prev_point = start_point
+                for intersection in seg_intersections:
+                    segments.append((prev_point, intersection, "to_intersection"))
+                    prev_point = intersection
+                segments.append((prev_point, end_point, "from_intersection"))
+
+        return segments
     
-    for weight, group_iter in groupby(points, key=lambda p: p.weight):
-        group = list(group_iter)
-        if len(group) > 1:
-            envelope_count = sum(1 for p in group if p.vectorId is not None)
-            intersection_count = sum(1 for p in group if p.vectorId is None)
-            vector_ids = {p.vectorId for p in group if p.vectorId is not None}
+    def _analyze_intersections(self):
+        """Internal method to find intersections and split envelopes."""
+        # Find all intersections
+        self.intersections = self.find_all_intersections(self.env1_original, self.env2_original)
+        
+        # Prepare intersections for each envelope
+        env1_intersections = [(seg1, point) for seg1, seg2, point in self.intersections]
+        env2_intersections = [(seg2, point) for seg1, seg2, point in self.intersections]
+        
+        # Split envelopes at intersections
+        self.env1_segments = self.split_envelope_at_intersections(self.env1_original, env1_intersections)
+        self.env2_segments = self.split_envelope_at_intersections(self.env2_original, env2_intersections)
+    
+    def _create_connection_graph(self):
+        """Create a dictionary mapping each point to the points it connects to."""
+        self.connections = {}
+
+        for segments in self.env1_segments:
+            start,end,_ = segments
+            # Use CGPoint objects directly as keys
+            if start not in self.connections:
+                self.connections[start] = set()
+            self.connections[start].add(end)
+             # Ensure end point exists in dictionary
+            if end not in self.connections:
+                self.connections[end] = set()
+
+        for segments in self.env2_segments:
+            start,end,_ = segments
+             # Use CGPoint objects directly as keys
+            if start not in self.connections:
+                self.connections[start] = set()
+            self.connections[start].add(end)
+            # Ensure end point exists in dictionary
+            if end not in self.connections:
+                self.connections[end] = set()
+
+        # Convert sets to sorted lists
+        for key in self.connections:
+            self.connections[key] = sorted(list(self.connections[key]), 
+                                         key=lambda p: (p.weight, -p.mac))
+        print(self.env1_segments)
+    
+    def get_points_at_weight(self, target_weight: float) -> List[CGPoint]:
+        """Get all points at a specific weight, sorted by MAC descending."""
+        points_at_weight = []
+        
+        for point in self.connections.keys():
+            if abs(point.weight - target_weight) < 0.01:
+                points_at_weight.append(point)
+        
+        points_at_weight.sort(key=lambda p: p.mac, reverse=True)
+        return points_at_weight
+    
+    def find_closest_point(self, target_point: CGPoint) -> CGPoint:
+        """Find the closest point in the connections dictionary to the target point."""
+        if target_point in self.connections:
+            return target_point
+        
+        min_distance = float('inf')
+        closest_point = None
+        
+        for point in self.connections.keys():
+            distance = ((point.mac - target_point.mac) ** 2 + 
+                       (point.weight - target_point.weight) ** 2) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                closest_point = point
+        
+        return closest_point
+    
+    def find_optimal_path(self, start_point: CGPoint, end_point: CGPoint) -> List[CGPoint]:
+        """
+        Find the optimal path (highest MAC values) from start_point to end_point.
+        """
+        path = []
+        print("LISTEN")
+        current_point = None
+        A,_,_ = self.env1_segments[0]
+        B,_,_ = self.env2_segments[0]
+        if A.weight == B.weight:
+            if A.mac > B.mac:
+                current_point = A
+                print("Current point is A")
+            else:
+                current_point = B
+                print("Current point is B")
+                
+        elif A.weight > B.weight:
+            current_point = B
+            print("Current point is B")    
+        else:
+            current_point = A
+            print("Current point is A")
+        
+        # Find the closest actual point to our start point
+        current_env = current_point.env
+        path.append(current_point)
+        
+        while current_point.weight < end_point.weight:
+            # Get outgoing connections from current point
+            outgoing = self.connections.get(current_point, [])
+            print()
+            print("CURRENT WEIGHT",current_point.weight)
+            print("outgoing", outgoing)
+            print("current_point",current_point)
+            if not outgoing:
+                break
             
-            duplicate_info[weight] = {
-                'total_points': len(group),
-                'envelope_points': envelope_count,
-                'intersection_points': intersection_count,
-                'unique_vector_ids': len(vector_ids),
-                'vector_ids': vector_ids
-            }
+            # Find connections that lead to higher weight
+            next_candidates = [p for p in outgoing if p.weight > current_point.weight]
+            
+            if not next_candidates:
+                # Edge case where if we start with same macs or if we interpolated to this point
+                # We check if the outgoing has another outgoing with a higher weight RARELY we should enter here
+                for point in outgoing:
+                    for pt in self.connections.get(point,[]):
+                        if pt.weight > current_point.weight:
+                            next_candidates.append(point)
+                
+                if not next_candidates:
+                    break
+            
+            # Sort by MAC descending
+            next_candidates.sort(key=lambda p: -p.mac)
+            next_point = next_candidates[0]
+            current_env = next_point.env
+            
+            # Add the connected point to path
+            path.append(next_point)
+            current_point = next_point
+            
+            # Check for better MAC options at this weight level
+            points_at_weight = self.get_points_at_weight(next_point.weight)
+
+            # Look for higher MAC option at this weight
+            for point in points_at_weight:
+                #Only consider points of intersection or in the same envelope
+                if current_env== 0 or point.env == current_env or point.env == 0:
+                    # Check if this higher MAC point can progress further
+                    higher_outgoing = self.connections.get(point, [])
+                    can_progress = any(p.weight > current_point.weight for p in higher_outgoing)
+                    if current_point.weight >= end_point.weight or can_progress:
+                        path.append(point)
+                        current_point = point
+                        break
+                        
+            #Check to see if the current weight is max. If not add mac and add outgoing again for the same env
+            
+            filtered_points = [point for point in points_at_weight
+                               if current_env == 0 or point.env == current_env or point.env == 0]
+            max_at_weight = max(filtered_points, key=lambda point: point.mac, default=current_point)
+            if max_at_weight == current_point:
+                continue
+            else:
+                #Add max point at that weight
+                path.append(max_at_weight)
+                # add the current_point back
+                path.append(current_point)
+            
+            if current_point.weight >= end_point.weight:
+                break
+        
+        return path
     
-    return duplicate_info
-
-# Test with the data
-def main():
-    # Test with your corrected data where 21 has the smallest vectorPointId
-    points = [
-        CGPoint(weight=160000, mac=16, vectorPointId=500005641, vectorId=500005640),
-        CGPoint(weight=188500, mac=16, vectorPointId=500005642, vectorId=500005640),
-        CGPoint(weight=197800, mac=15, vectorPointId=500005643, vectorId=500005640),
-        CGPoint(weight=233000, mac=15, vectorPointId=500005644, vectorId=500005640),
-        CGPoint(weight=245000, mac=15, vectorPointId=500005645, vectorId=500005640),
-        CGPoint(weight=270000, mac=15, vectorPointId=500005646, vectorId=500005640),
-        CGPoint(weight=280000, mac=19, vectorPointId=500005647, vectorId=500005640),
-        CGPoint(weight=300000, mac=18, vectorPointId=None, vectorId=None),
-        CGPoint(weight=300000, mac=15, vectorPointId=500005648, vectorId=500005640),  # smallest vectorPointId 
-        CGPoint(weight=300000, mac=21, vectorPointId=500005649, vectorId=500005640),  # highest vectorPointId for continuation
-        CGPoint(weight=300000, mac=18, vectorPointId=500005613, vectorId=500005794), # second smallest vectorPointId
-        CGPoint(weight=350000, mac=17, vectorPointId=500005650, vectorId=500005640),
-        CGPoint(weight=354600, mac=18, vectorPointId=500005651, vectorId=500005640),
-        CGPoint(weight=368000, mac=15, vectorPointId=500005652, vectorId=500005640),
-    ]
-
-    print("Duplicate analysis:")
-    duplicates = analyze_duplicates(points)
-    for weight, info in duplicates.items():
-        print(f"Weight {weight}: {info}")
-
-    print("\nOriginal points:")
-    for point in points:
-        print(point)
-
-    print("\nCleaned points:")
-    cleaned_points = clean_duplicate_weights(points)
-    for point in cleaned_points:
-        print(point)
-
-    print("\nWeight 300000 group specifically:")
-    weight_300k_points = [p for p in cleaned_points if p.weight == 300000]
-    for i, point in enumerate(weight_300k_points, 1):
-        print(f"{i}. {point}")
+    def plot_analysis(self, optimal_path: List[CGPoint] = None, title: str = "Envelope Analysis"):
+        """Plot the envelopes, intersections, and optimal path."""
+        plt.figure(figsize=(14, 10))
+        
+        # Plot original envelopes
+        env1_mac = [point.mac for point in self.env1_original]
+        env1_weight = [point.weight for point in self.env1_original]
+        env2_mac = [point.mac for point in self.env2_original]
+        env2_weight = [point.weight for point in self.env2_original]
+        
+        plt.plot(env1_mac, env1_weight, 'b-', linewidth=2, label='Envelope 1', 
+                marker='o', markersize=6)
+        plt.plot(env2_mac, env2_weight, 'g-', linewidth=2, label='Envelope 2', 
+                marker='s', markersize=6)
+        
+        # Plot intersection points
+        if self.intersections:
+            intersection_points = [point for _, _, point in self.intersections]
+            intersection_mac = [point.mac for point in intersection_points]
+            intersection_weight = [point.weight for point in intersection_points]
+            plt.plot(intersection_mac, intersection_weight, 'rx', markersize=12, 
+                    markeredgewidth=3, label='Intersections',alpha=0.7)
+        
+        # Plot optimal path if provided
+        if optimal_path:
+            path_mac = [point.mac for point in optimal_path]
+            path_weight = [point.weight for point in optimal_path]
+            plt.plot(path_mac, path_weight, 'ro-', linewidth=3, markersize=8, 
+                    alpha=0.7, label='Limiting')
+        
+        plt.xlabel('MAC (Mean Aerodynamic Chord)')
+        plt.ylabel('Weight')
+        plt.title(title)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
     
-    print("\nExpected order for weight 300000:")
-    print("1. First: Compare smallest vectorPointId from each vectorId group:")
-    print("   - vectorId 500005640: smallest vectorPointId=500005648, mac=21")
-    print("   - vectorId 500005794: smallest vectorPointId=500005613, mac=18") 
-    print("   Choose highest MAC: mac=21, so first point is (500005648, mac=21)")
-    print("2-3. Middle: Other points sorted by type and MAC")
-    print("4. Last: Continuation point (highest vectorPointId for continuing vectorId)")
+    def print_summary(self, optimal_path: List[CGPoint] = None):
+        """Print a comprehensive summary of the analysis."""
+        print(f"\n" + "="*80)
+        print("ENVELOPE INTERSECTION ANALYSIS SUMMARY")
+        print("="*80)
+        
+        print(f"Envelope 1: {len(self.env1_original)} points")
+        print(f"Envelope 2: {len(self.env2_original)} points")
+        print(f"Intersections found: {len(self.intersections)}")
+        print(f"Envelope 1 split into: {len(self.env1_segments)} segments")
+        print(f"Envelope 2 split into: {len(self.env2_segments)} segments")
+        print(f"Total unique points in graph: {len(self.connections)}")
+        
+        if self.intersections:
+            print(f"\nIntersection Points:")
+            for i, (seg1, seg2, point) in enumerate(self.intersections):
+                print(f"  {i+1}: {point} (Env1 seg {seg1} ↔ Env2 seg {seg2})")
+        
+        if optimal_path:
+            print(f"\nOptimal Path ({len(optimal_path)} points):")
+            for i, point in enumerate(optimal_path):
+                print(f"  Step {i+1}: {point} (MAC: {point.mac:.2f})")
+            
+            total_mac = sum(point.mac for point in optimal_path)
+            avg_mac = total_mac / len(optimal_path)
+            print(f"\nPath Statistics:")
+            print(f"  Average MAC: {avg_mac:.2f}")
+            print(f"  Weight range: {optimal_path[0].weight:.0f} → {optimal_path[-1].weight:.0f}")
 
-if __name__ == "__main__":
-    main()
+
+# Define the envelopes
+env1 = [
+    CGPoint(weight=150000, mac=21.00,env=1),
+    CGPoint(weight=200000, mac=21.00,env=1),
+    CGPoint(weight=200000, mac=16.00,env=1),
+    CGPoint(weight=250000, mac=17.00,env=1),
+    CGPoint(weight=250000, mac=21.00,env=1),
+    CGPoint(weight=300000, mac=22.00,env=1),
+    CGPoint(weight=300000, mac=17.00,env=1),
+]
+
+env2 = [
+    CGPoint(weight=100000, mac=15.00,env=2),
+    CGPoint(weight=150000, mac=15.00,env=2),
+    CGPoint(weight=200000, mac=18.00,env=2),
+    CGPoint(weight=250000, mac=14.00,env=2),
+    CGPoint(weight=250000, mac=26.00,env=2),
+    CGPoint(weight=250000, mac=19.00,env=2),
+    CGPoint(weight=300000, mac=22.00,env=2)
+]
+
+# Find optimal path
+start_point = env1[0]
+end_point = env1[-1]
+
+
+# Create analyzer instance
+analyzer = EnvelopeIntersectionAnalyzer(env1, env2)
+
+# Print basic analysis
+print(f"Found {len(analyzer.intersections)} intersections:")
+for i, (seg1, seg2, point) in enumerate(analyzer.intersections):
+    print(f"Intersection {i+1}: Env1 segment {seg1} ↔ Env2 segment {seg2} at {point}")
+print()
+
+# Print segments
+print("Envelope 1 Segments:")
+for i, (start, end, seg_type) in enumerate(analyzer.env1_segments):
+    print(f"Envelope1 Segment {i}: {start} -> {end} ({seg_type})")
+
+print("\nEnvelope 2 Segments:")
+for i, (start, end, seg_type) in enumerate(analyzer.env2_segments):
+    print(f"Envelope2 Segment {i}: {start} -> {end} ({seg_type})")
+
+# Print all connections
+print(f"\nAll Point Connections:")
+print("=" * 50)
+for point, connected_points in sorted(analyzer.connections.items(), key=lambda x: (x[0].weight, x[0].mac)):
+    print(f"{point} -> {len(connected_points)} connections:")
+    for connected in connected_points:
+        print(f"    {connected}")
+    print()
+
+
+optimal_path = analyzer.find_optimal_path(start_point, end_point)
+
+# Print summary
+analyzer.print_summary(optimal_path)
+
+# Plot the analysis
+analyzer.plot_analysis(optimal_path, "Aircraft CG Envelope Analysis")
+
+print(f"\nScript completed successfully!")
+print(f"Total intersections found: {len(analyzer.intersections)}")
+print(f"Envelope 1 split into {len(analyzer.env1_segments)} segments")
+print(f"Envelope 2 split into {len(analyzer.env2_segments)} segments")
+print(f"Total unique points in network: {len(analyzer.connections)}")
+
+# env1 = [
+#     CGPoint(weight=150000, mac=15,env=1),
+#     CGPoint(weight=200000, mac=15,env=1), 
+#     CGPoint(weight=200000, mac=26,env=1),
+#     CGPoint(weight=300000, mac=25,env=1)
+# ]
+
+# env2 = [
+#     CGPoint(weight=150000, mac=21,env=2),
+#     CGPoint(weight=300000, mac=25,env=2)
+# ]
+
+# Find optimal path
+# start_point = env2[0]
+# end_point = env1[-1]
+
+# env1 = [
+#     CGPoint(weight=150000, mac=21.00,env=1),
+#     CGPoint(weight=225000, mac=26.00,env=1),
+#     CGPoint(weight=300000, mac=16.00,env=1)
+# ]
+
+# env2 = [
+#     CGPoint(weight=150000, mac=15.00,env=2),
+#     CGPoint(weight=200000, mac=18.00,env=2),
+#     CGPoint(weight=250000, mac=14.00,env=2),
+#     CGPoint(weight=250000, mac=26.00,env=2),
+#     CGPoint(weight=250000, mac=19.00,env=2),
+#     CGPoint(weight=300000, mac=22.00,env=2)
+# ]
+# # Find optimal path
+# start_point = env1[0]
+# end_point = env1[-1]
+
+# env1 = [
+#     CGPoint(weight=1200,mac=15,env=1),
+#     CGPoint(weight=1500,mac=17,env=1),
+#     CGPoint(weight=1500,mac=16,env=1),
+#     CGPoint(weight=1500,mac=18,env=1),
+#     CGPoint(weight=2200,mac=22,env=1),
+#     CGPoint(weight=2800,mac=30,env=1),
+# ]
+
+# env2 = [
+#      CGPoint(weight=1200,mac=16,env=2),
+#      CGPoint(weight=1500,mac=15,env=2),
+#      CGPoint(weight=2500,mac=25,env=2),
+#      CGPoint(weight=2800,mac=31,env=2),
+# ]
+# # Find optimal path
+# start_point = env2[0]
+# end_point = env1[-1]
+
+# env1 = [
+#     CGPoint(weight=150000, mac=21.00,env=1),
+#     CGPoint(weight=200000, mac=21.00,env=1),
+#     CGPoint(weight=200000, mac=16.00,env=1),
+#     CGPoint(weight=250000, mac=17.00,env=1),
+#     CGPoint(weight=250000, mac=21.00,env=1),
+#     CGPoint(weight=300000, mac=22.00,env=1),
+#     CGPoint(weight=300000, mac=17.00,env=1),
+# ]
+
+# env2 = [
+#     CGPoint(weight=150000, mac=15.00,env=2),
+#     CGPoint(weight=200000, mac=18.00,env=2),
+#     CGPoint(weight=250000, mac=14.00,env=2),
+#     CGPoint(weight=250000, mac=26.00,env=2),
+#     CGPoint(weight=250000, mac=19.00,env=2),
+#     CGPoint(weight=300000, mac=22.00,env=2)
+# ]
+
+# # Find optimal path
+# start_point = env1[0]
+# end_point = env1[-1]
+
+
+# env1 = [
+#     CGPoint(weight=200000, mac=21.00,env=1),
+#     CGPoint(weight=200000, mac=16.00,env=1),
+#     CGPoint(weight=250000, mac=17.00,env=1),
+#     CGPoint(weight=250000, mac=21.00,env=1),
+#     CGPoint(weight=300000, mac=22.00,env=1),
+#     CGPoint(weight=300000, mac=17.00,env=1),
+# ]
+
+# env2 = [
+#     CGPoint(weight=200000, mac=15.00,env=2),
+#     CGPoint(weight=300000, mac=20.00,env=2),
+# ]
+
+# # Find optimal path
+# start_point = env1[0]
+# end_point = env1[-1]
+
+# env1 = [
+# CGPoint(weight=160000, mac=16,env=1),
+# CGPoint(weight=188500, mac=16,env=1),
+# CGPoint(weight=197800, mac=15,env=1),
+# CGPoint(weight=233000, mac=15,env=1),
+# CGPoint(weight=245000, mac=15,env=1),
+# CGPoint(weight=270000, mac=15,env=1),
+# CGPoint(weight=280000, mac=19,env=1),
+# CGPoint(weight=300000, mac=18,env=1),
+# CGPoint(weight=300000, mac=17,env=1),
+# CGPoint(weight=350000, mac=17,env=1),
+# CGPoint(weight=354600, mac=18,env=1),
+# CGPoint(weight=368000, mac=15,env=1),
+# ]
+
+# env2 = [
+# CGPoint(weight=160000, mac=16,env=2),
+# CGPoint(weight=188500, mac=16,env=2),
+# CGPoint(weight=197800, mac=15,env=2),
+# CGPoint(weight=233000, mac=15,env=2),
+# CGPoint(weight=245000, mac=15,env=2),
+# CGPoint(weight=270000, mac=15,env=2),
+# CGPoint(weight=280000, mac=19,env=2),
+# CGPoint(weight=300000, mac=21,env=2),
+# CGPoint(weight=300000, mac=24,env=2),
+# CGPoint(weight=350000, mac=17,env=2),
+# CGPoint(weight=354600, mac=18,env=2),
+# CGPoint(weight=368000, mac=23,env=2),
+# ]
+
+# # Find optimal path
+# start_point = env1[0]
+# end_point = env1[-1]
+
+# env1 = [
+# CGPoint(weight=160000, mac=16,env=1),
+# CGPoint(weight=188500, mac=16,env=1),
+# CGPoint(weight=197800, mac=15,env=1),
+# CGPoint(weight=233000, mac=15,env=1),
+# CGPoint(weight=245000, mac=15,env=1),
+# CGPoint(weight=270000, mac=15,env=1),
+# CGPoint(weight=280000, mac=19,env=1),
+# CGPoint(weight=320000, mac=18,env=1),
+# CGPoint(weight=320001, mac=15,env=1),
+# CGPoint(weight=350000, mac=17,env=1),
+# CGPoint(weight=354600, mac=18,env=1),
+# CGPoint(weight=368000, mac=15,env=1),
+# ]
+
+# env2 = [
+# CGPoint(weight=160000, mac=16,env=2),
+# CGPoint(weight=188500, mac=16,env=2),
+# CGPoint(weight=197800, mac=15,env=2),
+# CGPoint(weight=233000, mac=15,env=2),
+# CGPoint(weight=300000, mac=19,env=2),
+# CGPoint(weight=300000, mac=21,env=2),
+# CGPoint(weight=300000, mac=16,env=2),
+# CGPoint(weight=350000, mac=17,env=2),
+# CGPoint(weight=354600, mac=18,env=2),
+# CGPoint(weight=368000, mac=15,env=2),
+# ]
+
+# # Find optimal path
+# start_point = env1[0]
+# end_point = env1[-1]
