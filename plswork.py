@@ -263,7 +263,7 @@ class EnvelopeIntersectionAnalyzer:
             self.connections[key] = sorted(list(self.connections[key]), 
                                          key=lambda p: (p.weight, -p.mac))
     
-    def get_points_at_weight(self, target_weight: float) -> List[CGPoint]:
+    def get_points_at_weight(self, target_weight: float, isFwd = True) -> List[CGPoint]:
         """Get all points at a specific weight, sorted by MAC descending."""
         points_at_weight = []
         
@@ -271,27 +271,10 @@ class EnvelopeIntersectionAnalyzer:
             if abs(point.weight - target_weight) < 0.01:
                 points_at_weight.append(point)
         
-        points_at_weight.sort(key=lambda p: p.mac, reverse=True)
+        points_at_weight.sort(key=lambda p: p.mac, reverse=isFwd)
         return points_at_weight
     
-    def find_closest_point(self, target_point: CGPoint) -> CGPoint:
-        """Find the closest point in the connections dictionary to the target point."""
-        if target_point in self.connections:
-            return target_point
-        
-        min_distance = float('inf')
-        closest_point = None
-        
-        for point in self.connections.keys():
-            distance = ((point.mac - target_point.mac) ** 2 + 
-                       (point.weight - target_point.weight) ** 2) ** 0.5
-            if distance < min_distance:
-                min_distance = distance
-                closest_point = point
-        
-        return closest_point
-    
-    def find_optimal_path(self) -> List[CGPoint]:
+    def find_optimal_path(self, isFwd=False) -> List[CGPoint]:
         """
         Find the optimal path (highest MAC values) from start_point to end_point.
         """
@@ -302,7 +285,7 @@ class EnvelopeIntersectionAnalyzer:
         start_A,_,_ = self.env1_segments[0]
         start_B,_,_ = self.env2_segments[0]
         if start_A.weight == start_B.weight:
-            if start_A.mac > start_B.mac:
+            if isFwd and start_A.mac > start_B.mac:
                 current_point = start_A
                 print("Current point is A")
             else:
@@ -352,7 +335,10 @@ class EnvelopeIntersectionAnalyzer:
                     break
             print(next_candidates)
             # Sort by MAC descending
-            next_candidates.sort(key=lambda p: -p.mac)
+            if isFwd:
+                next_candidates.sort(key=lambda p: -p.mac)
+            else:
+                next_candidates.sort(key=lambda p: p.mac)
             next_point = next_candidates[0]
             current_env = next_point.env
             
@@ -361,12 +347,12 @@ class EnvelopeIntersectionAnalyzer:
             current_point = next_point
             
             # Check for better MAC options at this weight level
-            points_at_weight = self.get_points_at_weight(next_point.weight)
+            points_at_weight = self.get_points_at_weight(next_point.weight,isFwd=isFwd)
 
             # Look for higher MAC option at this weight
             for point in points_at_weight:
                 #Only consider points of intersection or in the same envelope
-                if  current_env== 0 or point.env == current_env or point.env == 0:
+                if current_env== 0 or point.env == current_env or point.env == 0:
                     # Check if this higher MAC point can progress further
                     higher_outgoing = self.connections.get(point, [])
                     print("higher_outgoing = ", higher_outgoing)
@@ -380,7 +366,7 @@ class EnvelopeIntersectionAnalyzer:
             
             filtered_points = [point for point in points_at_weight
                                if current_env == 0 or point.env == current_env or point.env == 0]
-            max_at_weight = max(filtered_points, key=lambda point: point.mac, default=current_point)
+            max_at_weight = max(filtered_points, key=lambda point: point.mac, default=current_point) if isFwd else min(filtered_points, key=lambda point: point.mac, default=current_point)
             if max_at_weight == current_point:
                 continue
             else:
@@ -464,9 +450,10 @@ class EnvelopeIntersectionAnalyzer:
 
 # Define the envelopes
 env1 = [
+    CGPoint(weight=100000, mac=21.00,env=1),
     CGPoint(weight=200000, mac=21.00,env=1),
     CGPoint(weight=200000, mac=16.00,env=1),
-    CGPoint(weight=250000, mac=17.00,env=1),
+    CGPoint(weight=250000, mac=16.00,env=1),
     CGPoint(weight=250000, mac=21.00,env=1),
     CGPoint(weight=300000, mac=22.00,env=1),
     CGPoint(weight=300000, mac=17.00,env=1),
@@ -474,8 +461,10 @@ env1 = [
 ]
 
 env2 = [
+    CGPoint(weight=150000, mac=15.00,env=2),
     CGPoint(weight=200000, mac=15.00,env=2),
     CGPoint(weight=330000, mac=20.00,env=2),
+    CGPoint(weight=350000, mac=20.00,env=2),
 ]
 
 
